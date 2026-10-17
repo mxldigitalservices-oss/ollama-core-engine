@@ -1,0 +1,15 @@
+{
+	admin off
+}
+
+:{$PORT} {
+	@health path /health
+	respond @health "ok" 200
+
+	@unauth not header Authorization "Bearer {$API_TOKEN}"
+	respond @unauth "unauthorized" 401
+
+	reverse_proxy 127.0.0.1:11434 {
+		flush_interval -1
+	}
+}
