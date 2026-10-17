@@ -10,6 +10,7 @@
 	respond @unauth "unauthorized" 401
 
 	reverse_proxy 127.0.0.1:11434 {
+		header_up Host 127.0.0.1:11434
 		flush_interval -1
 	}
 }
