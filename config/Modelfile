@@ -1,0 +1,8 @@
+FROM qwen2.5:32b
+
+SYSTEM """
+[INJECT_PROMPT_HERE]
+"""
+
+PARAMETER temperature 0.15
+PARAMETER num_ctx 32768
