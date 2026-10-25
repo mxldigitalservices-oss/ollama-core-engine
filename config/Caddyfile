@@ -6,8 +6,22 @@
 	@health path /health
 	respond @health "ok" 200
 
-	@unauth not header Authorization "Bearer {$API_TOKEN}"
+	# Entrada cómoda desde el navegador: / lleva al dashboard
+	@root path /
+	redir @root /ui 302
+
+	# El dashboard (HTML/JS estático, sin secretos) se sirve sin token; sus datos van por /agent/* con Bearer
+	@ui path /ui /ui/*
+	reverse_proxy @ui 127.0.0.1:8081
+
+	@unauth {
+		not path /health /ui /ui/*
+		not header Authorization "Bearer {$API_TOKEN}"
+	}
 	respond @unauth "unauthorized" 401
+
+	# Agente programador (el servicio también valida el token por su cuenta)
+	reverse_proxy /agent/* 127.0.0.1:8081
 
 	reverse_proxy 127.0.0.1:11434 {
 		header_up Host 127.0.0.1:11434

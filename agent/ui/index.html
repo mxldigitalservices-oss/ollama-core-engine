@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Elite Architect · Panel de control</title>
+<meta name="color-scheme" content="light dark">
+<script src="https://cdn.tailwindcss.com/3.4.17"></script>
+<style>
+  :root { --bg:#eef1f6; --panel:#ffffff; --sunk:#f4f6fa; --line:#d6dce8; --ink:#172033; --mute:#5b6679;
+          --signal:#2457f5; --signal-ink:#ffffff; --ok:#1c7d54; --bad:#b83232; --warn:#9a6a12; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0e1420; --panel:#161e2f; --sunk:#111827; --line:#2a3550; --ink:#e5e9f3; --mute:#9aa6bd;
+            --signal:#7d9cff; --signal-ink:#0e1420; --ok:#4cc38a; --bad:#ff7b7b; --warn:#e3b04b; }
+  }
+  html, body { height: 100%; }
+  body { background: var(--bg); color: var(--ink); font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  :focus-visible { outline: 2px solid var(--signal); outline-offset: 2px; }
+  .stage-bar { height: 6px; border-radius: 3px; background: var(--line); }
+  .stage-done .stage-bar { background: var(--ok); }
+  .stage-active .stage-bar { background: var(--signal); }
+  .stage-fail .stage-bar { background: var(--bad); }
+  .stage-active .stage-bar { animation: pulse 1.4s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity: .45; } }
+  @media (prefers-reduced-motion: reduce) { .stage-active .stage-bar { animation: none; } }
+  select, textarea, input[type=password], input[type=text] { background: var(--sunk); border: 1px solid var(--line); border-radius: 6px; color: var(--ink); }
+  pre { white-space: pre-wrap; word-break: break-word; }
+</style>
+</head>
+<body class="text-sm antialiased">
+
+<div id="login" class="min-h-full flex items-center justify-center p-4">
+  <form id="login-form" class="w-full max-w-md rounded-lg border border-[var(--line)] bg-[var(--panel)] p-6 space-y-4">
+    <div>
+      <h1 class="text-xl font-semibold">Elite Architect</h1>
+      <p class="mt-1 text-[var(--mute)]">Escribe el <span class="mono">API_TOKEN</span> de tu servicio para abrir el panel. Se guarda solo en este navegador.</p>
+    </div>
+    <label class="block">
+      <span class="font-medium">API_TOKEN</span>
+      <input id="token" type="password" autocomplete="current-password" required class="mt-1 w-full px-3 py-2 mono">
+    </label>
+    <label class="flex items-center gap-2 text-[var(--mute)]"><input id="remember" type="checkbox"> Recordar en este dispositivo</label>
+    <p id="login-error" class="text-[var(--bad)] min-h-[1.25rem]" role="alert"></p>
+    <button class="w-full rounded-md bg-[var(--signal)] text-[var(--signal-ink)] font-medium py-2.5">Conectar</button>
+    <p class="text-xs text-[var(--mute)]">¿No tienes el token? Es la variable <span class="mono">API_TOKEN</span> del servicio en Railway (Variables).</p>
+  </form>
+</div>
+
+<div id="app" hidden class="min-h-full flex flex-col lg:h-full">
+  <header class="flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 border-b border-[var(--line)] bg-[var(--panel)]">
+    <div class="mr-auto">
+      <h1 class="font-semibold text-base leading-tight">Elite Architect</h1>
+      <p class="text-xs text-[var(--mute)]">Agente programador full-stack con validación antes de cada commit</p>
+    </div>
+    <div id="pills" class="flex flex-wrap gap-2 text-xs"></div>
+    <button id="logout" class="text-xs text-[var(--mute)] underline underline-offset-2">Cambiar token</button>
+  </header>
+
+  <main class="flex-1 grid lg:grid-cols-[minmax(0,1fr)_minmax(0,30rem)] lg:min-h-0">
+    <section class="flex flex-col lg:min-h-0 lg:border-r border-[var(--line)]">
+      <div id="feed" class="flex-1 lg:overflow-y-auto p-4 space-y-5" aria-live="polite"></div>
+      <form id="composer" class="sticky bottom-0 border-t border-[var(--line)] bg-[var(--panel)] p-3 space-y-2">
+        <div class="flex flex-wrap gap-2" id="examples"></div>
+        <textarea id="instruction" rows="3" maxlength="4000" class="w-full px-3 py-2 resize-y" placeholder="Describe lo que necesitas. Ej.: Créame una página web para una barbería con reservas, backend en FastAPI y PostgreSQL."></textarea>
+        <div class="flex flex-wrap items-end gap-3">
+          <fieldset class="flex rounded-md border border-[var(--line)] overflow-hidden" aria-label="Modo">
+            <label class="cursor-pointer"><input type="radio" name="mode" value="task" class="peer sr-only" checked><span class="block px-3 py-1.5 peer-checked:bg-[var(--signal)] peer-checked:text-[var(--signal-ink)] peer-focus-visible:outline">Tarea</span></label>
+            <label class="cursor-pointer"><input type="radio" name="mode" value="project" class="peer sr-only"><span class="block px-3 py-1.5 peer-checked:bg-[var(--signal)] peer-checked:text-[var(--signal-ink)] peer-focus-visible:outline">Proyecto completo</span></label>
+          </fieldset>
+          <label class="text-xs text-[var(--mute)]">Modelo<select id="model" class="block mt-0.5 px-2 py-1.5 text-sm max-w-[11rem]"></select></label>
+          <label class="text-xs text-[var(--mute)]">Repositorio destino<select id="repo" class="block mt-0.5 px-2 py-1.5 text-sm max-w-[13rem]"></select></label>
+          <label class="flex items-center gap-2 text-xs text-[var(--mute)] pb-2"><input id="dry" type="checkbox"> Solo validar, sin subir</label>
+          <div class="ml-auto flex items-center gap-3">
+            <span id="count" class="text-xs text-[var(--mute)] mono">0/4000</span>
+            <button id="send" class="rounded-md bg-[var(--signal)] text-[var(--signal-ink)] font-medium px-4 py-2 disabled:opacity-50">Enviar al agente</button>
+          </div>
+        </div>
+        <p id="mode-hint" class="text-xs text-[var(--mute)]"></p>
+      </form>
+    </section>
+
+    <aside class="flex flex-col lg:min-h-0 border-t lg:border-t-0 border-[var(--line)] bg-[var(--panel)]">
+      <div id="tabs" role="tablist" class="flex border-b border-[var(--line)] overflow-x-auto"></div>
+      <div id="panel" class="flex-1 lg:overflow-y-auto p-4 space-y-4 min-h-[16rem]" role="tabpanel"></div>
+    </aside>
+  </main>
+</div>
+
+<script src="/ui/app.js"></script>
+</body>
+</html>

@@ -17,6 +17,14 @@ docker build -f "${ROOT_DIR}/docker/Dockerfile" -t "${IMAGE_NAME}" "${ROOT_DIR}"
 
 docker rm -f "${CONTAINER_NAME}" >/dev/null 2>&1 || true
 
+# Variables opcionales del agente programador (solo se pasan si están definidas)
+EXTRA_ENV=()
+for var in GITHUB_TOKEN GITHUB_REPO AGENT_ENABLED AGENT_TARGET_BRANCH AGENT_ALLOWED_REPOS AGENT_PROTECTED_REPOS AGENT_MODEL BASE_MODEL EXTRA_MODELS OLLAMA_BASE_URL AGENT_PROJECT_MAX_FILES; do
+  if [ -n "${!var:-}" ]; then
+    EXTRA_ENV+=(-e "${var}=${!var}")
+  fi
+done
+
 echo "Levantando contenedor en el puerto ${HOST_PORT}..."
 docker run -d \
   --name "${CONTAINER_NAME}" \
@@ -24,6 +32,7 @@ docker run -d \
   -p "${HOST_PORT}:8080" \
   -e PORT=8080 \
   -e API_TOKEN="${API_TOKEN}" \
+  ${EXTRA_ENV[@]+"${EXTRA_ENV[@]}"} \
   -v "${VOLUME_NAME}:/root/.ollama" \
   "${IMAGE_NAME}" >/dev/null
 
@@ -31,6 +40,7 @@ echo "Esperando al proxy..."
 for _ in $(seq 1 60); do
   if curl -fsS "http://localhost:${HOST_PORT}/health" >/dev/null 2>&1; then
     echo "Servicio activo en http://localhost:${HOST_PORT}"
+    echo "Dashboard: http://localhost:${HOST_PORT}/ui (pide el API_TOKEN)"
     echo "API_TOKEN=${API_TOKEN}"
     echo "El modelo se descarga en segundo plano: docker logs -f ${CONTAINER_NAME}"
     exit 0
