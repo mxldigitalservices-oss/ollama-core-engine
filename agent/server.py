@@ -6,6 +6,8 @@ GET  /agent/task/<id>   -> estado, pasos, razonamiento, validación y resultado
 GET  /agent/tasks       -> últimas tareas
 GET  /agent/config      -> configuración visible y checklist de variables (nunca valores secretos)
 GET  /agent/models      -> modelos instalados y sugeridos
+GET  /agent/memory      -> estado de la memoria ligera (proyectos, tamaño, lecciones)
+POST /agent/memory/purge-> {} purga lo caducado | {"repo": "o/n"} olvida un proyecto | {"all": true} borra todo
 GET  /agent/health      -> estado del servicio
 """
 from __future__ import annotations
@@ -24,6 +26,7 @@ from collections import OrderedDict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from . import config, engine
+from . import memory, web
 from .gitops import GitError, Workspace
 from .llm import installed_models
 
@@ -47,7 +50,7 @@ CSP = ("default-src 'self'; script-src 'self' https://cdn.tailwindcss.com; style
 MODEL_RE = re.compile(r"^[A-Za-z0-9._:/-]{1,100}$")
 
 PUBLIC_KEYS = ("id", "status", "repo", "model", "mode", "dry_run", "instruction", "created", "finished",
-               "steps", "reasoning", "validation", "plan", "result", "error")
+               "steps", "reasoning", "validation", "plan", "web", "memory", "result", "error")
 
 
 def _public(task: dict) -> dict:
@@ -69,6 +72,8 @@ def _env_checklist() -> list[dict]:
         row("AGENT_ALLOWED_REPOS", False, os.getenv("AGENT_ALLOWED_REPOS"), "Lista (coma) de repos que el selector puede usar. Por defecto solo GITHUB_REPO."),
         row("OLLAMA_BASE_URL", False, os.getenv("OLLAMA_BASE_URL") or os.getenv("AGENT_OLLAMA_URL"), "Solo si Ollama corre en otro servicio; por defecto http://127.0.0.1:11434 dentro del contenedor."),
         row("BASE_MODEL / EXTRA_MODELS", False, os.getenv("BASE_MODEL") or os.getenv("EXTRA_MODELS"), "Modelo base y modelos extra que se descargan al arrancar (p. ej. deepseek-coder-v2:16b)."),
+        row("SEARXNG_URL / BRAVE_API_KEY", False, config.SEARXNG_URL or config.BRAVE_API_KEY, "Proveedor de búsqueda web (opcional). Sin ellos se usa DuckDuckGo en modo mejor esfuerzo; PyPI y npm siempre funcionan."),
+        row("AGENT_WEB / AGENT_MEMORY", False, os.getenv("AGENT_WEB") or os.getenv("AGENT_MEMORY"), "0 desactiva la web o la memoria (por defecto activas)."),
         row("AGENT_TARGET_BRANCH", False, config.TARGET_BRANCH, "Vacío = rama nueva por tarea (recomendado). main = push directo."),
     ]
 
@@ -177,8 +182,11 @@ class Handler(BaseHTTPRequestHandler):
                 "limits": {"max_files": config.MAX_FILES, "project_max_files": config.PROJECT_MAX_FILES,
                            "max_instruction": config.MAX_INSTRUCTION, "iterations": config.MAX_ITERATIONS,
                            "llm_review": config.LLM_REVIEW},
-                "env": _env_checklist(),
+                "env": _env_checklist(), "web": web.status(),
+                "memory": {"enabled": config.MEMORY_ENABLED, "ttl_days": config.MEMORY_PROJECT_TTL_DAYS, "max_bytes": config.MEMORY_MAX_BYTES},
             })
+        if path == "/agent/memory":
+            return self._send(200, memory.manager().stats())
         if path == "/agent/tasks":
             with TASKS_LOCK:
                 items = [{"id": t["id"], "status": t["status"], "created": t["created"], "mode": t.get("mode"),
@@ -190,10 +198,23 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, _public(task)) if task else self._send(404, {"error": "tarea no encontrada"})
         self._send(404, {"error": "no encontrado"})
 
+    def _memory_purge(self, body: dict) -> None:
+        mem = memory.manager()
+        if body.get("all") is True:
+            result = {"forgotten_projects": mem.forget(None)}
+        elif "repo" in body:
+            if body["repo"] not in config.ALLOWED_REPOS:
+                return self._send(400, {"error": "repo no permitido (ver AGENT_ALLOWED_REPOS)"})
+            result = {"forgotten_projects": mem.forget(body["repo"])}
+        else:
+            result = mem.purge()
+        self._send(200, {"result": result, "memory": mem.stats()})
+
     def do_POST(self):  # noqa: N802
         if not self._authorized():
             return self._send(401, {"error": "unauthorized"})
-        if self.path.split("?", 1)[0].rstrip("/") != "/agent/task":
+        route = self.path.split("?", 1)[0].rstrip("/")
+        if route not in ("/agent/task", "/agent/memory/purge"):
             return self._send(404, {"error": "no encontrado"})
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -207,6 +228,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ValueError
         except ValueError:
             return self._send(400, {"error": "JSON inválido"})
+        if route == "/agent/memory/purge":
+            return self._memory_purge(body)
         data, err = _validate_request(body)
         if err:
             return self._send(400, {"error": err})
@@ -228,6 +251,11 @@ def main() -> None:
         sys.exit("Falta API_TOKEN")
     if not config.GITHUB_TOKEN or not config.GITHUB_REPO:
         sys.exit("Faltan GITHUB_TOKEN y/o GITHUB_REPO")
+    try:
+        purged = memory.manager().purge()  # arranque limpio: descarta lo caducado
+        log.info("Memoria: purga inicial %s", purged)
+    except OSError as exc:
+        log.warning("Memoria: no se pudo purgar al arrancar (%s)", exc)
     threading.Thread(target=_worker, daemon=True).start()
     srv = ThreadingHTTPServer((config.HOST, config.PORT), Handler)
     log.info("Agente escuchando en %s:%s (repo %s)", config.HOST, config.PORT, config.GITHUB_REPO)

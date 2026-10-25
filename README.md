@@ -15,6 +15,9 @@ Agente programador autónomo **full-stack** sobre Ollama. Recibe un requerimient
 
     agent/engine.py         Ciclo de una tarea: generar -> validar -> revisar -> corregir -> publicar
     agent/project.py        Modo proyecto: plan -> lotes -> empaquetado -> validación -> publicación
+    agent/web.py            Acceso web acotado: paquetes PyPI/npm, búsqueda, descarga segura de documentación
+    agent/research.py       La web en el ciclo de validación: dependencias, manifiestos, referencias
+    agent/memory.py         Memoria ligera por proyecto con purga automática
     agent/validators.py     Validación estática (Python, JS/TS, CSS, HTML/EJS, Dockerfile, YAML, JSON, XML, secretos)
     agent/autogit.py        add + commit descriptivo + push (también como CLI)
     agent/gitops.py         Git seguro: token por GIT_ASKPASS, repos vacíos, verificación del push
@@ -46,6 +49,8 @@ El dashboard carga Tailwind desde `cdn.tailwindcss.com` (versión fijada 3.4.17)
 | `GITHUB_TOKEN` | **Sí** | Token fino de GitHub: *Repository access* solo a los repos destino, permiso *Contents: Read and write* |
 | `GITHUB_REPO` | **Sí** | Repo destino por defecto (`owner/nombre`) |
 | `PORT` | Recomendada | `8080` (puerto del dominio público) |
+| `SEARXNG_URL` / `BRAVE_API_KEY` | No | Proveedor de búsqueda web (sin ellos: DuckDuckGo, mejor esfuerzo). `AGENT_SEARCH_PROVIDER`, `AGENT_WEB=0`, `AGENT_WEB_ALLOWED_DOMAINS`, `AGENT_WEB_MAX_SEARCHES` ajustan la web |
+| `AGENT_KNOWLEDGE_DIR` | No | Carpeta de la memoria (por defecto `/root/.ollama/agent-knowledge`). `AGENT_MEMORY=0`, `AGENT_MEMORY_TTL_DAYS`, `AGENT_MEMORY_MAX_BYTES` la ajustan |
 | `APIKEYS_PEPPER` | Solo si usas `apikeys` | Pepper del hash de API keys (mín. 16 caracteres) |
 | `AGENT_ALLOWED_REPOS` | No | Repos que aparecen en el selector, separados por comas. Por defecto solo `GITHUB_REPO` |
 | `BASE_MODEL` | No | Modelo base de `elite-architect` (por defecto `qwen2.5-coder:7b`) |
@@ -93,6 +98,42 @@ CLI: `cd /opt && APIKEYS_PEPPER=... python3 -m apikeys generate --name app --sto
 ### Qué ejecuta los tests
 
 El validador del agente es **estático y nunca ejecuta código** (barrera de seguridad). Los tests los ejecuta: `python3 -m unittest discover -s tests -v` en tu máquina, y el workflow `.github/workflows/tests.yml` en cada push. Ese workflow está en `.github/`, ruta que el agente no puede escribir: se sube a mano una vez.
+
+## Búsqueda web autónoma
+
+El agente consulta la web **por su cuenta** durante el ciclo de validación (sin intervención tuya) y todo lo que encuentra queda visible en la pestaña *Razonamiento* y *Memoria y web* del dashboard.
+
+| Cuándo | Qué hace |
+|---|---|
+| Hay un `import` sin declarar de una librería conocida (p. ej. `pydantic`) | Verifica su versión real en PyPI y la agrega a `requirements.txt` **sin gastar otra llamada al modelo** |
+| El modelo declara paquetes en `requirements.txt` / `package.json` | Comprueba en PyPI/npm que existan y tengan historial; si no, es un error que el modelo debe corregir |
+| Una validación falla (sintaxis, pyflakes, HTML, revisión) | Busca documentación y se la entrega al modelo junto con la corrección |
+| El modelo necesita confirmar una API | Responde `=== SEARCH: consulta ===`, el motor busca y le devuelve referencias |
+
+**Seguridad (importante):**
+- Un paquete **desconocido nunca se agrega solo**: podría ser un módulo propio que falta (`from utils import x`) o un nombre inventado/registrado por un atacante. Solo se auto-agregan librerías de una lista curada y verificadas en vivo; para el resto se le informa al modelo si existe en PyPI y él decide. Todo paquete declarado debe existir y tener al menos `AGENT_PACKAGE_MIN_RELEASES` versiones y `AGENT_PACKAGE_MIN_AGE_DAYS` días (las librerías conocidas se exceptúan del historial, no de la existencia).
+- El texto de la web es **dato no confiable**: se entrega delimitado, sin etiquetas ni marcadores del formato del agente, acotado, y con la orden de ignorar instrucciones que contenga.
+- Solo se **descargan** páginas de `AGENT_WEB_ALLOWED_DOMAINS` (https, sin credenciales, solo IPs públicas, también en cada redirección). Los resultados de búsqueda aportan título y extracto sin descargar nada.
+- Las consultas se redactan antes de salir (secretos, URLs, rutas, correos, tokens).
+- Presupuesto por tarea (`AGENT_WEB_MAX_SEARCHES`=3, `AGENT_WEB_MAX_FETCHES`=2, 60 consultas de paquetes) y corte automático si no hay conexión: el motor sigue sin web en lugar de esperar timeouts.
+
+**Buscador:** `AGENT_SEARCH_PROVIDER=auto` usa SearXNG si defines `SEARXNG_URL` (instancia con formato JSON habilitado), Brave si defines `BRAVE_API_KEY`, y si no DuckDuckGo en modo *mejor esfuerzo* (sin clave, pero puede fallar o ser bloqueado desde IPs de nube). Para fiabilidad en producción configura SearXNG o Brave. `none` desactiva la búsqueda (la verificación de paquetes sigue). `AGENT_WEB=0` apaga toda la web.
+
+## Memoria ligera y contextual
+
+Carpeta de conocimiento: `AGENT_KNOWLEDGE_DIR` (por defecto `/root/.ollama/agent-knowledge`, en el volumen).
+
+    agent-knowledge/
+      projects/<owner__repo>/context.json   stack, resumen, última tarea, variables de entorno, MAPA de archivos
+      projects/<owner__repo>/lessons.json   errores ya ocurridos y resueltos (con contador)
+      refs/<hash>.json                      caché de consultas web (caduca)
+      active.json                           proyecto en curso
+
+- **Solo lo esencial:** del código guarda rutas, tamaños y nombres de funciones/clases; nunca el código. Tampoco historial de conversación. Todo texto se redacta de secretos y los archivos se crean con permisos 0600.
+- **Contexto activo:** antes de cada tarea se inyecta al prompt un resumen compacto (`AGENT_MEMORY_PROMPT_CHARS`=2500) con lo más relevante para la instrucción primero y las 3 lecciones más frecuentes.
+- **Purga automática** (al arrancar, tras cada tarea y bajo demanda): proyectos inactivos más de `AGENT_MEMORY_TTL_DAYS` (30; el activo se conserva), referencias web caducadas (`AGENT_WEB_CACHE_TTL`), y lo más antiguo cuando se supera `AGENT_MEMORY_MAX_BYTES` (5 MB; primero referencias). Dentro de un proyecto: tope de lecciones (40) y de archivos (200), y se descartan archivos que ya no existen.
+- **Control:** pestaña *Memoria y web* (purgar, olvidar un proyecto, borrar todo), o `GET /agent/memory` y `POST /agent/memory/purge` (`{}` purga, `{"repo":"o/n"}` olvida, `{"all":true}` borra todo). `AGENT_MEMORY=0` la desactiva.
+- La memoria y la web nunca bloquean una tarea: ante cualquier fallo se ignoran y el motor continúa.
 
 ## Despliegue en Railway
 
@@ -155,10 +196,12 @@ Especialidades del prompt: frontend (HTML5, CSS3, JS/TS, React, EJS, Tailwind, P
 | Método y ruta | Descripción |
 |---|---|
 | `POST /agent/task` | Encola una tarea (202 + `id`). Campos: `instruction`, `mode` (`task`\|`project`), `model`, `repo`, `dry_run`, `paths`, `context_files` |
-| `GET /agent/task/<id>` | Estado, `steps`, `reasoning`, `validation`, `plan`, `result` |
+| `GET /agent/task/<id>` | Estado, `steps`, `reasoning`, `validation`, `plan`, `web`, `memory`, `result` |
 | `GET /agent/tasks` | Últimas tareas |
 | `GET /agent/config` | Modelos, repos, límites y checklist de variables (solo si están definidas, nunca el valor) |
 | `GET /agent/models` | Modelos instalados y sugeridos |
+| `GET /agent/memory` | Estado de la memoria (proyectos, tamaño, lecciones) |
+| `POST /agent/memory/purge` | `{}` purga lo caducado · `{"repo":"o/n"}` olvida un proyecto · `{"all":true}` borra todo |
 
     curl -s https://TU-DOMINIO.up.railway.app/agent/task \
       -H "Authorization: Bearer $API_TOKEN" \

@@ -184,12 +184,12 @@ function renderFeed() {
 }
 
 /* ---------- panel lateral ---------- */
-const TABS = [["reasoning", "Razonamiento"], ["validation", "Validación"], ["files", "Archivos"], ["connect", "Conexión"]];
+const TABS = [["reasoning", "Razonamiento"], ["validation", "Validación"], ["files", "Archivos"], ["memory", "Memoria y web"], ["connect", "Conexión"]];
 function renderTabs() {
   $("tabs").replaceChildren(...TABS.map(([id, label]) => h("button", {
     type: "button", role: "tab", "aria-selected": String(state.tab === id),
     class: "px-4 py-2.5 whitespace-nowrap border-b-2 " + (state.tab === id ? "border-[var(--signal)] font-medium" : "border-transparent text-[var(--mute)]"),
-    onclick: () => { state.tab = id; renderTabs(); renderPanel(); },
+    onclick: () => { state.tab = id; renderTabs(); renderPanel(); if (id === "memory") loadMemory(); },
   }, label)));
 }
 const empty = (text) => h("p", { class: "text-[var(--mute)]" }, text);
@@ -200,6 +200,9 @@ function panelReasoning(t) {
   const out = [];
   if (t.plan) out.push(block("Plan de arquitectura", h("p", {}, t.plan.summary), h("p", { class: "text-xs text-[var(--mute)]" }, "Stack: " + (t.plan.stack || []).join(", "))));
   (t.reasoning || []).forEach((r) => out.push(block(r.stage, h("pre", { class: "mono text-xs rounded-md bg-[var(--sunk)] border border-[var(--line)] p-3" }, r.text))));
+  if ((t.web || []).length) out.push(block("Referencias web consultadas", h("ul", { class: "space-y-1" }, t.web.map((w) => h("li", { class: "text-xs" },
+    h("span", { class: "text-[var(--mute)]" }, w.kind + ": "), w.url ? h("a", { href: w.url, target: "_blank", rel: "noopener noreferrer", class: "underline text-[var(--signal)]" }, w.title || w.url) : w.title)))));
+  if (t.memory && t.memory.used) out.push(block("Memoria", h("p", { class: "text-xs text-[var(--mute)]" }, "Se reutilizó el contexto guardado de este proyecto" + (t.memory.lessons ? " (" + t.memory.lessons + " lección(es))." : "."))));
   out.push(block("Bitácora", h("ol", { class: "space-y-1" }, (t.steps || []).map((s) => h("li", { class: "flex gap-2" }, h("span", { class: "mono text-xs text-[var(--mute)]" }, s.t), h("span", {}, s.msg))))));
   if (!t.reasoning || !t.reasoning.length) out.unshift(empty(ACTIVE.has(t.status) ? "El agente aún está razonando…" : "Este modelo no devolvió bloque de razonamiento."));
   return out;
@@ -225,6 +228,37 @@ function panelFiles(t) {
   if ((r.warnings || []).length) out.push(block("Advertencias", r.warnings.slice(0, 10).map((w) => h("p", { class: "mono text-xs text-[var(--warn)]" }, w))));
   return out;
 }
+async function loadMemory() {
+  try { state.mem = await api("/agent/memory"); renderPanel(); } catch (e) { /* sin acceso */ }
+}
+async function memoryAction(body, confirmText) {
+  if (confirmText && !window.confirm(confirmText)) return;
+  try { const r = await api("/agent/memory/purge", { method: "POST", body: JSON.stringify(body) }); state.mem = r.memory; renderPanel(); }
+  catch (e) { if (e.message !== "unauthorized") window.alert("No se pudo completar: " + e.message); }
+}
+const kb = (n) => (n / 1024).toFixed(n < 10240 ? 1 : 0) + " KB";
+function panelMemory() {
+  const w = state.cfg.web || {}, m = state.mem, cfgm = state.cfg.memory || {};
+  const out = [
+    block("Búsqueda web autónoma",
+      h("p", {}, w.enabled ? "Activa. Buscador: " + w.provider + (w.provider === "duckduckgo" ? " (mejor esfuerzo; configura SEARXNG_URL o BRAVE_API_KEY para más fiabilidad)." : ".") : "Desactivada (AGENT_WEB=0)."),
+      h("p", { class: "text-xs text-[var(--mute)]" }, "Verifica dependencias en PyPI y npm, busca documentación ante errores y solo descarga páginas de " + (w.allowed_domains || []).length + " dominios permitidos. Límite por tarea: " + (w.max_searches || 0) + " búsquedas.")),
+  ];
+  if (!cfgm.enabled) return [...out, block("Memoria ligera", h("p", {}, "Desactivada (AGENT_MEMORY=0)."))];
+  out.push(block("Memoria ligera",
+    h("p", { class: "text-xs text-[var(--mute)]" }, "Guarda solo el mapa de archivos, el stack y las lecciones del proyecto en curso. Se purga sola: proyectos inactivos más de " + cfgm.ttl_days + " días y tope de " + kb(cfgm.max_bytes) + ".")));
+  if (!m) return [...out, empty("Cargando estado de la memoria…")];
+  out.push(h("p", {}, m.projects.length + " proyecto(s) · " + m.refs + " referencia(s) en caché · " + kb(m.bytes) + " de " + kb(m.max_bytes)));
+  out.push(h("ul", { class: "divide-y divide-[var(--line)] rounded-md border border-[var(--line)]" }, m.projects.length ? m.projects.map((p) => h("li", { class: "px-3 py-2" },
+    h("p", { class: "mono text-xs break-all" }, p.repo + (p.active ? "  (activo)" : "")),
+    h("p", { class: "text-xs text-[var(--mute)]" }, p.files + " archivos · " + p.lessons + " lecciones · " + p.tasks + " tarea(s) · " + kb(p.bytes) + (p.updated ? " · " + new Date(p.updated * 1000).toLocaleString() : "")))) : [h("li", { class: "px-3 py-2 text-[var(--mute)]" }, "Todavía no hay proyectos en memoria.")]));
+  const btn = (label, fn) => h("button", { type: "button", class: "rounded-md border border-[var(--line)] px-3 py-1.5 text-xs", onclick: fn }, label);
+  out.push(h("div", { class: "flex flex-wrap gap-2" },
+    btn("Purgar ahora", () => memoryAction({})),
+    btn("Olvidar " + ($("repo").value || "proyecto"), () => memoryAction({ repo: $("repo").value }, "¿Olvidar lo que el agente recuerda de " + $("repo").value + "?")),
+    btn("Borrar toda la memoria", () => memoryAction({ all: true }, "¿Borrar TODA la memoria del agente?"))));
+  return out;
+}
 function panelConnect() {
   const c = state.cfg;
   const rows = c.env.map((v) => h("li", { class: "py-2 flex gap-3" },
@@ -246,7 +280,7 @@ function panelConnect() {
 }
 function renderPanel() {
   const t = state.tasks.get(state.selected);
-  const view = { reasoning: panelReasoning, validation: panelValidation, files: panelFiles, connect: panelConnect }[state.tab];
+  const view = { reasoning: panelReasoning, validation: panelValidation, files: panelFiles, memory: panelMemory, connect: panelConnect }[state.tab];
   $("panel").replaceChildren(...view(t).flat());
 }
 

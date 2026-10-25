@@ -47,6 +47,37 @@ GIT_EMAIL = os.getenv("AGENT_GIT_EMAIL", "agent@users.noreply.github.com")
 GIT_TIMEOUT = _int("AGENT_GIT_TIMEOUT", 120)
 WORKSPACE = os.getenv("AGENT_WORKSPACE", "/root/.ollama/agent-workspace")
 
+# --- Búsqueda web autónoma (documentación, dependencias, referencias técnicas) ---
+WEB_ENABLED = os.getenv("AGENT_WEB", "1") != "0"
+# auto = SearXNG si hay SEARXNG_URL, Brave si hay BRAVE_API_KEY, si no DuckDuckGo (mejor esfuerzo). none = sin búsqueda.
+SEARCH_PROVIDER = os.getenv("AGENT_SEARCH_PROVIDER", "auto").lower()
+SEARXNG_URL = os.getenv("SEARXNG_URL", "").rstrip("/")
+BRAVE_API_KEY = os.getenv("BRAVE_API_KEY", "")
+WEB_TIMEOUT = _int("AGENT_WEB_TIMEOUT", 8)
+WEB_MAX_SEARCHES = _int("AGENT_WEB_MAX_SEARCHES", 3)   # por tarea
+WEB_MAX_FETCHES = _int("AGENT_WEB_MAX_FETCHES", 2)     # páginas de documentación por tarea
+WEB_MAX_PACKAGE_LOOKUPS = _int("AGENT_WEB_MAX_PACKAGES", 60)
+WEB_CACHE_TTL = _int("AGENT_WEB_CACHE_TTL", 86_400)    # segundos
+# Páginas que el agente puede DESCARGAR (los resultados de búsqueda solo aportan título y extracto).
+WEB_ALLOWED_DOMAINS = _list("AGENT_WEB_ALLOWED_DOMAINS", [
+    "docs.python.org", "docs.pydantic.dev", "fastapi.tiangolo.com", "flask.palletsprojects.com",
+    "developer.mozilla.org", "react.dev", "expressjs.com", "nodejs.org", "tailwindcss.com", "www.postgresql.org",
+    "redis.io", "www.mongodb.com", "dev.mysql.com", "docs.docker.com", "caddyserver.com", "docs.railway.com",
+    "render.com", "readthedocs.io", "docs.sqlalchemy.org", "www.sqlalchemy.org", "requests.readthedocs.io",
+])
+# Un paquete que el modelo agrega debe existir y tener historial; si no, se rechaza (anti paquete inventado).
+PACKAGE_MIN_RELEASES = _int("AGENT_PACKAGE_MIN_RELEASES", 3)
+PACKAGE_MIN_AGE_DAYS = _int("AGENT_PACKAGE_MIN_AGE_DAYS", 30)
+
+# --- Memoria ligera por proyecto (carpetas locales de conocimiento) ---
+MEMORY_ENABLED = os.getenv("AGENT_MEMORY", "1") != "0"
+KNOWLEDGE_DIR = os.getenv("AGENT_KNOWLEDGE_DIR") or os.path.join(os.path.dirname(WORKSPACE.rstrip("/")) or "/", "agent-knowledge")
+MEMORY_MAX_BYTES = _int("AGENT_MEMORY_MAX_BYTES", 5_000_000)
+MEMORY_PROJECT_TTL_DAYS = _int("AGENT_MEMORY_TTL_DAYS", 30)   # proyectos inactivos se descartan
+MEMORY_MAX_LESSONS = _int("AGENT_MEMORY_MAX_LESSONS", 40)
+MEMORY_MAX_FILES = _int("AGENT_MEMORY_MAX_FILES", 200)
+MEMORY_PROMPT_CHARS = _int("AGENT_MEMORY_PROMPT_CHARS", 2500)
+
 # --- Ciclo de autoanálisis ---
 MAX_ITERATIONS = max(1, _int("AGENT_MAX_ITERATIONS", 3))
 LLM_REVIEW = os.getenv("AGENT_LLM_REVIEW", "1") != "0"

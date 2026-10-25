@@ -136,6 +136,7 @@ class EndToEndTests(unittest.TestCase):
             "WORKSPACE": os.path.join(self.tmp, "ws"),
             "REMOTE_TEMPLATE": "file://" + os.path.join(self.tmp, "remote", "{repo}.git"),
             "TARGET_BRANCH": "", "GITHUB_TOKEN": "", "API_TOKEN": "", "BASE_BRANCH": "", "PROTECTED_REPOS": ["acme/demo"],
+            "WEB_ENABLED": False, "KNOWLEDGE_DIR": os.path.join(self.tmp, "knowledge"),  # sin red ni escritura fuera del tmp
         }
         for k, v in patches.items():
             p = mock.patch.object(config, k, v)

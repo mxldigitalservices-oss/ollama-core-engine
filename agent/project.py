@@ -10,6 +10,7 @@ import posixpath
 import re
 
 from . import config, engine, validators
+from . import research as research_mod
 from .gitops import GitError
 from .llm import LLMError
 
@@ -137,9 +138,10 @@ def _context(files: dict[str, str], budget: int) -> str:
     return "\n\n".join(parts)
 
 
-def _ask_files(llm, system: dict, prompt: str, wanted: list[str], task: dict, stage: str) -> dict[str, str]:
+def _ask_files(llm, system: dict, prompt: str, wanted: list[str], task: dict, stage: str,
+               research=None, step=lambda msg: None) -> dict[str, str]:
     """Pide archivos concretos al modelo; solo acepta los solicitados."""
-    raw = llm([system, {"role": "user", "content": prompt}])
+    raw = research_mod.generate(llm, [system, {"role": "user", "content": prompt}], research, step)
     thoughts = engine.extract_reasoning(raw)
     if thoughts:
         task.setdefault("reasoning", []).append({"stage": stage, "text": thoughts})
@@ -163,17 +165,20 @@ def run_project(task: dict, ws, llm, step, model: str) -> dict:
     try:
         step(f"sincronizando repositorio ({ws.repo}) - modelo {model}")
         ws.sync()
+        research = research_mod.for_task(task, step)
+        mem_ctx = engine.recall(task, ws, step)
         if ws.empty:
             step("repositorio vacío: el primer commit creará la rama principal")
 
         # 1) Plan ---------------------------------------------------------
-        system_plan = {"role": "system", "content": SYSTEM_PLAN.replace("{max_files}", str(config.PROJECT_MAX_FILES))}
-        request = f"REQUERIMIENTO:\n{task['instruction']}"
+        system_plan = {"role": "system", "content": research_mod.system_with_search(
+            SYSTEM_PLAN.replace("{max_files}", str(config.PROJECT_MAX_FILES)), research)}
+        request = f"REQUERIMIENTO:\n{task['instruction']}" + (f"\n\n{mem_ctx}" if mem_ctx else "")
         plan, problems = None, []
         for attempt in (1, 2):
             step(f"planificando arquitectura (intento {attempt}/2)")
             prompt = request if not problems else request + "\n\nCORRIGE EL PLAN ANTERIOR:\n" + "\n".join(f"- {p}" for p in problems)
-            raw = llm([system_plan, {"role": "user", "content": prompt}])
+            raw = research_mod.generate(llm, [system_plan, {"role": "user", "content": prompt}], research, step)
             thoughts = engine.extract_reasoning(raw)
             if thoughts:
                 task.setdefault("reasoning", []).append({"stage": f"Plan (intento {attempt})", "text": thoughts})
@@ -186,7 +191,7 @@ def run_project(task: dict, ws, llm, step, model: str) -> dict:
         step(f"plan: {len(plan['files'])} archivos ({', '.join(plan['stack']) or 'sin stack declarado'})")
 
         # 2) Generación por lotes ------------------------------------------
-        system_gen = {"role": "system", "content": engine.SYSTEM_AGENT.format(max_files=config.PROJECT_BATCH)
+        system_gen = {"role": "system", "content": research_mod.system_with_search(engine.SYSTEM_AGENT.format(max_files=config.PROJECT_BATCH), research)
                       + "\nEstás generando una parte de un proyecto mayor: devuelve SOLO los archivos pedidos, coherentes con el plan y con los ya generados (mismos nombres de funciones, rutas y variables)."}
         paths = [f["path"] for f in plan["files"]]
         files: dict[str, str] = {}
@@ -196,9 +201,10 @@ def run_project(task: dict, ws, llm, step, model: str) -> dict:
             wanted = list(batch)
             for attempt in (1, 2):
                 prompt = (f"{_plan_digest(plan)}\n\nREQUERIMIENTO ORIGINAL:\n{task['instruction']}\n\n"
+                          + (f"{mem_ctx}\n\n" if mem_ctx else "")
                           + (f"ARCHIVOS YA GENERADOS:\n{_context(files, config.MAX_CONTEXT_CHARS // 2)}\n\n" if files else "")
                           + "GENERA AHORA, completos y en el formato indicado, SOLO estos archivos: " + ", ".join(wanted))
-                got = _ask_files(llm, system_gen, prompt, wanted, task, f"Lote {n}/{len(batches)}")
+                got = _ask_files(llm, system_gen, prompt, wanted, task, f"Lote {n}/{len(batches)}", research, step)
                 files.update(got)
                 wanted = [p for p in wanted if p not in got]
                 if not wanted:
@@ -214,8 +220,8 @@ def run_project(task: dict, ws, llm, step, model: str) -> dict:
             added = package(files, plan)
             if added:
                 step("empaquetado: se agregó " + ", ".join(added))
-            report = validators.validate_files(files, ws.root, secret_values=secrets, repo=ws.repo,
-                                               max_files=config.PROJECT_MAX_FILES + 3)
+            report = research_mod.validate(files, research, step, ws.root, lambda f: validators.validate_files(
+                f, ws.root, secret_values=secrets, repo=ws.repo, max_files=config.PROJECT_MAX_FILES + 3))
             last_errors = [str(i) for i in report.errors]
             feedback: list[str]
             if last_errors:
@@ -241,11 +247,14 @@ def run_project(task: dict, ws, llm, step, model: str) -> dict:
             if it == config.MAX_ITERATIONS or not affected:
                 break
             step(f"corrigiendo: {', '.join(affected)}")
+            task.setdefault("_errors", []).extend(f for f in feedback if not f.startswith("[revisión]"))
+            extra = research_mod.web_feedback(research, feedback, step)
             prompt = (f"{_plan_digest(plan)}\n\nREQUERIMIENTO ORIGINAL:\n{task['instruction']}\n\n"
                       f"ARCHIVOS A CORREGIR:\n{_context({p: files[p] for p in affected}, config.MAX_CONTEXT_CHARS)}\n\n"
                       "PROBLEMAS:\n" + "\n".join(f"- {f}" for f in feedback)
+                      + (f"\n\n{extra}" if extra else "")
                       + "\n\nDevuelve completos SOLO los archivos corregidos, en el mismo formato.")
-            fixed = _ask_files(llm, system_gen, prompt, affected, task, f"Corrección {it}")
+            fixed = _ask_files(llm, system_gen, prompt, affected, task, f"Corrección {it}", research, step)
             if not fixed:
                 step("el modelo no devolvió archivos corregidos")
                 break

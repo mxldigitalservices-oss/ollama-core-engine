@@ -107,7 +107,8 @@ class ProjectModeTests(unittest.TestCase):
         for k, v in {"WORKSPACE": os.path.join(self.tmp, "ws"),
                      "REMOTE_TEMPLATE": "file://" + os.path.join(self.tmp, "remote", "{repo}.git"),
                      "TARGET_BRANCH": "", "GITHUB_TOKEN": "", "API_TOKEN": "", "BASE_BRANCH": "",
-                     "PROTECTED_REPOS": ["acme/motor"], "PROJECT_BATCH": 2}.items():
+                     "PROTECTED_REPOS": ["acme/motor"], "PROJECT_BATCH": 2, "WEB_ENABLED": False,
+                     "KNOWLEDGE_DIR": os.path.join(self.tmp, "knowledge")}.items():
             p = mock.patch.object(config, k, v)
             p.start()
             self.addCleanup(p.stop)

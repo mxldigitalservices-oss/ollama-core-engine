@@ -7,7 +7,8 @@ import re
 import time
 from dataclasses import dataclass, field
 
-from . import config, validators
+from . import config, memory, validators
+from . import research as research_mod
 from .autogit import publish
 from .gitops import GitError, Workspace
 from .llm import LLMError, chat
@@ -145,8 +146,10 @@ def _numbered(files: dict[str, str], budget: int) -> str:
     return text[:budget] + ("\n[... truncado ...]" if len(text) > budget else "")
 
 
-def _first_prompt(task: dict, ws: Workspace, with_context: bool) -> str:
+def _first_prompt(task: dict, ws: Workspace, with_context: bool, memory_ctx: str = "") -> str:
     parts = [f"INSTRUCCIÓN:\n{task['instruction']}"]
+    if memory_ctx:
+        parts.append(memory_ctx)
     if task.get("paths"):
         parts.append("Archivos a crear o modificar: " + ", ".join(task["paths"]))
     if with_context:
@@ -188,9 +191,11 @@ def run_task(task: dict, ws: Workspace, llm=chat) -> dict:
     try:
         step(f"sincronizando repositorio ({ws.repo}) - modelo {model}")
         ws.sync()
-        system = {"role": "system", "content": SYSTEM_AGENT.format(max_files=config.MAX_FILES)}
-        messages = [system, {"role": "user", "content": _first_prompt(task, ws, True)}]
-        short_prompt = _first_prompt(task, ws, False)
+        research = research_mod.for_task(task, step)
+        mem_ctx = recall(task, ws, step)
+        system = {"role": "system", "content": research_mod.system_with_search(SYSTEM_AGENT.format(max_files=config.MAX_FILES), research)}
+        messages = [system, {"role": "user", "content": _first_prompt(task, ws, True, mem_ctx)}]
+        short_prompt = _first_prompt(task, ws, False, mem_ctx)
 
         candidate: dict | None = None
         last_errors: list[str] = []
@@ -198,7 +203,7 @@ def run_task(task: dict, ws: Workspace, llm=chat) -> dict:
         for it in range(1, config.MAX_ITERATIONS + 1):
             iterations = it
             step(f"iteración {it}/{config.MAX_ITERATIONS}: generando código")
-            raw = llm(messages)
+            raw = research_mod.generate(llm, messages, research, step)
             thoughts = extract_reasoning(raw)
             if thoughts:
                 task.setdefault("reasoning", []).append({"stage": f"Iteración {it}", "text": thoughts})
@@ -207,7 +212,8 @@ def run_task(task: dict, ws: Workspace, llm=chat) -> dict:
                 last_errors = ["formato inválido: usa '=== FILE: ruta ===' ... '=== END FILE ===' con el contenido completo"]
                 report = None
             else:
-                report = validators.validate_files(parsed.files, ws.root, secret_values=secrets, repo=ws.repo)
+                report = research_mod.validate(parsed.files, research, step, ws.root, lambda f: validators.validate_files(
+                    f, ws.root, secret_values=secrets, repo=ws.repo))
                 last_errors = [str(i) for i in report.errors]
 
             if last_errors:
@@ -233,7 +239,11 @@ def run_task(task: dict, ws: Workspace, llm=chat) -> dict:
 
             if it == config.MAX_ITERATIONS:
                 break
+            task.setdefault("_errors", []).extend(f for f in feedback if not f.startswith("[revisión]"))
             fb = "Corrige TODOS estos problemas y devuelve los archivos completos en el mismo formato:\n" + "\n".join(f"- {f}" for f in feedback)
+            extra = research_mod.web_feedback(research, feedback, step)
+            if extra:
+                fb += "\n\n" + extra
             messages = [system, {"role": "user", "content": short_prompt},
                         {"role": "assistant", "content": render(parsed) if parsed.files else strip_reasoning(raw)[:4000]}, {"role": "user", "content": fb}]
 
@@ -248,6 +258,36 @@ def run_task(task: dict, ws: Workspace, llm=chat) -> dict:
         except Exception:  # noqa: BLE001 - limpieza best-effort
             pass
         return {"status": "failed", "error": str(exc)}
+
+
+def recall(task: dict, ws: Workspace, step) -> str:
+    """Contexto compacto del proyecto guardado en la memoria (vacío si no hay o está desactivada)."""
+    try:
+        mem = memory.for_repo(ws.repo)
+        if not mem:
+            return ""
+        text = mem.prompt(task["instruction"])
+    except (OSError, ValueError) as exc:  # la memoria nunca debe bloquear una tarea
+        step(f"memoria no disponible: {exc}")
+        return ""
+    task["memory"] = {"used": bool(text), "lessons": len(mem.lessons()) if text else 0}
+    if text:
+        step("memoria: se reutiliza el contexto guardado del proyecto")
+    return text
+
+
+def remember(task: dict, ws: Workspace, report, step) -> None:
+    """Guarda lo esencial del proyecto (mapa de archivos, lecciones) y purga lo caducado."""
+    try:
+        mem = memory.for_repo(ws.repo)
+        if not mem:
+            return
+        mem.record(task, report.files, ws.root, task.get("_errors"), task.get("plan"))
+        purged = memory.manager().purge()
+        task["memory"] = {**task.get("memory", {}), "saved": True, "purged": sum(purged.values())}
+        step("memoria actualizada" + (f" (se descartaron {sum(purged.values())} elemento(s) antiguos)" if sum(purged.values()) else ""))
+    except (OSError, ValueError) as exc:
+        step(f"memoria no actualizada: {exc}")
 
 
 def finish(task: dict, ws: Workspace, report, commit_raw: str, notes: list[str], iterations: int, model: str, step) -> dict:
@@ -270,5 +310,6 @@ def finish(task: dict, ws: Workspace, report, commit_raw: str, notes: list[str],
         return result
     result.update(info)
     result["status"] = "done"
+    remember(task, ws, report, step)
     step(f"listo: {info['commit'][:8]} en {info['branch']}" + (" (push verificado)" if info.get("verified") else ""))
     return result
